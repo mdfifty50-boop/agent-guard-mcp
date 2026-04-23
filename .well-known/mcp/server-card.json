@@ -1,0 +1,44 @@
+{
+  "serverInfo": {
+    "name": "agent-guard-mcp",
+    "version": "0.1.0",
+    "description": "Detects and prevents infinite agent loops — circuit breakers, pattern detection, and stuck-agent recovery for agentic systems",
+    "author": "THRONE AI",
+    "license": "MIT",
+    "homepage": "https://github.com/mdfifty50-boop/agent-guard-mcp",
+    "repository": "https://github.com/mdfifty50-boop/agent-guard-mcp"
+  },
+  "capabilities": {
+    "tools": [
+      { "name": "register_agent", "description": "Register an agent for loop monitoring with iteration limits and progress thresholds" },
+      { "name": "log_action", "description": "Log an agent action for loop detection with rolling window tracking" },
+      { "name": "detect_loop", "description": "Check if an agent is stuck in an infinite loop with confidence scoring" },
+      { "name": "set_circuit_breaker", "description": "Configure auto-terminate or warn on repeated action patterns" },
+      { "name": "check_circuit_breaker", "description": "Pre-flight check before executing a tool — should it proceed or be blocked?" },
+      { "name": "get_stuck_report", "description": "Detailed stuck analysis with action history, token waste estimate, and recovery plan" },
+      { "name": "get_health_dashboard", "description": "Overview of all monitored agents with loop risk scores" }
+    ],
+    "resources": [
+      { "uri": "agent-guard://agents", "description": "List all monitored agents and their current status" }
+    ]
+  },
+  "categories": ["monitoring", "reliability", "developer-tools", "agentic-engineering"],
+  "keywords": ["loop-detection", "circuit-breaker", "infinite-loop", "agent-guard", "stuck-detection", "ai-agent", "reliability"],
+  "pricing": {
+    "free_tier": true,
+    "free_limit": "Unlimited agents, in-memory only",
+    "pro": "$99/month — persistent storage, Slack/Discord alerts, multi-tenant",
+    "enterprise": "$499/month — SSO, audit logs, custom policies"
+  },
+  "install": {
+    "npm": "npx agent-guard-mcp",
+    "claude_desktop": {
+      "mcpServers": {
+        "agent-guard": {
+          "command": "npx",
+          "args": ["agent-guard-mcp"]
+        }
+      }
+    }
+  }
+}

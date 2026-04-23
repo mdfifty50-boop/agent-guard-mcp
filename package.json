@@ -1,0 +1,40 @@
+{
+  "name": "agent-guard-mcp",
+  "version": "0.1.0",
+  "mcpName": "io.github.mdfifty50-boop/agent-guard",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mdfifty50-boop/agent-guard-mcp"
+  },
+  "description": "MCP server that detects and prevents infinite agent loops — circuit breakers, pattern detection, and stuck-agent recovery for agentic systems",
+  "type": "module",
+  "main": "src/index.js",
+  "bin": {
+    "agent-guard-mcp": "src/index.js"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "test": "node --test src/**/*.test.js"
+  },
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "loop-detection",
+    "circuit-breaker",
+    "agent-guard",
+    "infinite-loop",
+    "ai-agent",
+    "stuck-detection",
+    "agentic-engineering",
+    "model-context-protocol"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "zod": "^3.24.0"
+  }
+}
