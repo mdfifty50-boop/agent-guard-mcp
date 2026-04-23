@@ -1,20 +1,11 @@
 /**
- * In-memory storage for agent loop detection and circuit breaking.
- * All data structures use Maps for O(1) lookups.
+ * SQLite-backed storage for agent loop detection and circuit breaking.
+ * All exported function signatures are identical to the original in-memory version.
+ * Persistence lives at ~/.agent-guard-mcp/guard.db (WAL mode).
  */
 
 import { createHash } from 'node:crypto';
-
-// Agent configs: agent_id -> { max_iterations, progress_threshold, registered_at }
-const agents = new Map();
-
-// Action logs: agent_id -> [{ signature, tool_name, args_hash, result_preview, timestamp }]
-const actionLogs = new Map();
-
-// Circuit breaker configs: agent_id -> { max_repeats, action, created_at }
-const circuitBreakers = new Map();
-
-const ROLLING_WINDOW = 50;
+import { db, stmts, enforceRollingWindow, ROLLING_WINDOW } from './db.js';
 
 /**
  * Hash an object deterministically for signature generation.
@@ -35,19 +26,16 @@ export function registerAgent(agentId, config) {
     progress_threshold: config.progress_threshold ?? 0.3,
     registered_at: new Date().toISOString(),
   };
-  agents.set(agentId, entry);
-  if (!actionLogs.has(agentId)) {
-    actionLogs.set(agentId, []);
-  }
+  stmts.upsertAgent.run(entry);
   return entry;
 }
 
 export function getAgent(agentId) {
-  return agents.get(agentId) || null;
+  return stmts.getAgent.get(agentId) || null;
 }
 
 export function listAgents() {
-  return [...agents.values()];
+  return stmts.listAgents.all();
 }
 
 // ═══════════════════════════════════════════
@@ -55,8 +43,7 @@ export function listAgents() {
 // ═══════════════════════════════════════════
 
 export function logAction(agentId, action) {
-  if (!agents.has(agentId)) {
-    // Auto-register with defaults
+  if (!getAgent(agentId)) {
     registerAgent(agentId, {});
   }
 
@@ -64,38 +51,36 @@ export function logAction(agentId, action) {
   const signature = `${action.tool_name}:${argsHash}`;
   const resultPreview = (action.result_preview || '').slice(0, 200);
 
-  const entry = {
+  stmts.insertLog.run({
+    agent_id: agentId,
     signature,
     tool_name: action.tool_name,
     args_hash: argsHash,
     result_preview: resultPreview,
     timestamp: new Date().toISOString(),
-  };
+  });
 
-  const log = actionLogs.get(agentId);
-  log.push(entry);
-
-  // Maintain rolling window
-  if (log.length > ROLLING_WINDOW) {
-    log.splice(0, log.length - ROLLING_WINDOW);
-  }
+  enforceRollingWindow(agentId);
 
   // Quick warning check on last 10 actions
-  const recent = log.slice(-10);
+  const recent = stmts.getLogsLast.all(agentId, 10).reverse();
   const sigCounts = {};
   for (const a of recent) {
     sigCounts[a.signature] = (sigCounts[a.signature] || 0) + 1;
   }
-  const maxRepeat = Math.max(...Object.values(sigCounts));
+  const values = Object.values(sigCounts);
+  const maxRepeat = values.length > 0 ? Math.max(...values) : 0;
   let warning = null;
   if (maxRepeat >= 3) {
     const repeatedSig = Object.entries(sigCounts).find(([, c]) => c >= 3)?.[0];
     warning = `Action "${repeatedSig}" repeated ${maxRepeat} times in last 10 actions — possible loop`;
   }
 
+  const { cnt: actionsCount } = stmts.countLogs.get(agentId);
+
   return {
     action_logged: true,
-    actions_count: log.length,
+    actions_count: actionsCount,
     warning,
   };
 }
@@ -105,7 +90,7 @@ export function logAction(agentId, action) {
 // ═══════════════════════════════════════════
 
 export function detectLoop(agentId) {
-  const config = agents.get(agentId);
+  const config = getAgent(agentId);
   if (!config) {
     return {
       is_stuck: false,
@@ -116,7 +101,7 @@ export function detectLoop(agentId) {
     };
   }
 
-  const log = actionLogs.get(agentId) || [];
+  const log = stmts.getLogsAll.all(agentId);
   if (log.length < 3) {
     return {
       is_stuck: false,
@@ -139,16 +124,17 @@ export function detectLoop(agentId) {
   const uniqueSignatures = new Set(allSignatures);
   const uniqueRatio = uniqueSignatures.size / allSignatures.length;
 
-  // Find repeated actions (3+)
+  // Find repeated actions (2+)
   const repeated = Object.entries(sigCounts10)
     .filter(([, count]) => count >= 2)
     .map(([signature, count]) => ({ signature, count }))
     .sort((a, b) => b.count - a.count);
 
   // Determine if stuck
-  const maxRepeatIn10 = Math.max(...Object.values(sigCounts10), 0);
-  const isStuckHard = maxRepeatIn10 >= 3; // Same action 3+ times in last 10
-  const isStuckSoft = uniqueRatio < config.progress_threshold; // Low diversity
+  const vals = Object.values(sigCounts10);
+  const maxRepeatIn10 = vals.length > 0 ? Math.max(...vals) : 0;
+  const isStuckHard = maxRepeatIn10 >= 3;
+  const isStuckSoft = uniqueRatio < config.progress_threshold;
 
   const is_stuck = isStuckHard || isStuckSoft;
 
@@ -204,12 +190,12 @@ export function setCircuitBreaker(agentId, config) {
     action: config.action || 'warn',
     created_at: new Date().toISOString(),
   };
-  circuitBreakers.set(agentId, entry);
+  stmts.upsertBreaker.run(entry);
   return entry;
 }
 
 export function checkCircuitBreaker(agentId, proposedTool, proposedArgs) {
-  const breaker = circuitBreakers.get(agentId);
+  const breaker = stmts.getBreaker.get(agentId);
   if (!breaker) {
     return {
       proceed: true,
@@ -219,12 +205,10 @@ export function checkCircuitBreaker(agentId, proposedTool, proposedArgs) {
     };
   }
 
-  const log = actionLogs.get(agentId) || [];
   const proposedHash = hashArgs(proposedArgs);
   const proposedSig = `${proposedTool}:${proposedHash}`;
 
-  // Count how many times this exact action has been done
-  const timesRepeated = log.filter(a => a.signature === proposedSig).length;
+  const { cnt: timesRepeated } = stmts.countSig.get(agentId, proposedSig);
 
   if (timesRepeated < breaker.max_repeats) {
     return {
@@ -269,7 +253,7 @@ export function checkCircuitBreaker(agentId, proposedTool, proposedArgs) {
 // ═══════════════════════════════════════════
 
 export function getStuckReport(agentId) {
-  const config = agents.get(agentId);
+  const config = getAgent(agentId);
   if (!config) {
     return {
       agent_id: agentId,
@@ -277,7 +261,7 @@ export function getStuckReport(agentId) {
     };
   }
 
-  const log = actionLogs.get(agentId) || [];
+  const log = stmts.getLogsAll.all(agentId);
   const loopResult = detectLoop(agentId);
 
   // Compute full signature frequency
@@ -293,7 +277,7 @@ export function getStuckReport(agentId) {
   // Token waste estimate: assume ~500 tokens per redundant action (conservative)
   const redundantActions = totalActions - uniqueSignatures;
   const estimatedTokenWaste = redundantActions * 500;
-  const estimatedCostWaste = parseFloat((estimatedTokenWaste * 0.000003).toFixed(4)); // ~$3/M tokens avg
+  const estimatedCostWaste = parseFloat((estimatedTokenWaste * 0.000003).toFixed(4));
 
   // Top repeated patterns
   const topPatterns = Object.entries(sigFrequency)
@@ -329,6 +313,8 @@ export function getStuckReport(agentId) {
     preview: a.result_preview || null,
   }));
 
+  const breaker = stmts.getBreaker.get(agentId) || null;
+
   return {
     agent_id: agentId,
     config: {
@@ -347,7 +333,7 @@ export function getStuckReport(agentId) {
     top_repeated_patterns: topPatterns,
     recommendations,
     recent_timeline: recentTimeline,
-    circuit_breaker: circuitBreakers.get(agentId) || null,
+    circuit_breaker: breaker,
     generated_at: new Date().toISOString(),
   };
 }
@@ -357,27 +343,30 @@ export function getStuckReport(agentId) {
 // ═══════════════════════════════════════════
 
 export function getHealthDashboard() {
+  const agentRows = stmts.listAgents.all();
   const agentList = [];
 
-  for (const [agentId, config] of agents) {
-    const log = actionLogs.get(agentId) || [];
+  for (const config of agentRows) {
+    const agentId = config.agent_id;
+    const { cnt: totalActions } = stmts.countLogs.get(agentId);
     const loopResult = detectLoop(agentId);
 
-    // Risk score: 0 (healthy) to 1 (definitely stuck)
-    let riskScore = loopResult.confidence;
+    const riskScore = loopResult.confidence;
+    const breaker = stmts.getBreaker.get(agentId);
 
-    // Boost risk if circuit breaker has been triggered recently
-    const breaker = circuitBreakers.get(agentId);
+    // Get last action timestamp
+    const lastRow = stmts.getLogsLast.all(agentId, 1);
+    const lastAction = lastRow.length > 0 ? lastRow[0].timestamp : null;
 
     agentList.push({
       agent_id: agentId,
       status: loopResult.is_stuck ? 'STUCK' : 'HEALTHY',
       risk_score: parseFloat(riskScore.toFixed(3)),
-      total_actions: log.length,
+      total_actions: totalActions,
       pattern: loopResult.pattern,
       circuit_breaker: breaker ? breaker.action : 'none',
       registered_at: config.registered_at,
-      last_action: log.length > 0 ? log[log.length - 1].timestamp : null,
+      last_action: lastAction,
     });
   }
 
